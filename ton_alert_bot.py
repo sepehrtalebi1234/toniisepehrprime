@@ -1,57 +1,85 @@
 import requests
 import time
-import traceback
+import os
+from datetime import datetime
+from dotenv import load_dotenv
 
-# اطلاعات تلگرام
-TELEGRAM_TOKEN = "توکن رباتت اینجا"
-TELEGRAM_CHAT_ID = "آیدی عددی تلگرامت اینجا"
+# بارگذاری متغیرهای محیطی از فایل .env
+load_dotenv()
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-def send_telegram(message):
+LOG_FILE = "log.txt"
+
+def send_telegram_message(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
     try:
         requests.post(url, data=data)
-    except:
-        pass  # در صورت قطع اینترنت یا خطای ارسال، نادیده بگیر
+    except Exception as e:
+        print(f"Error sending message: {e}")
 
-def fetch_price(symbol="ton/usdt"):
-    response = requests.get("https://api.nobitex.ir/market/stats")
-    stats = response.json()["stats"]
-    return float(stats[symbol.replace("/", "")]["latest"])
+def log(text):
+    with open(LOG_FILE, "a") as f:
+        f.write(f"{datetime.now()} - {text}\n")
+
+def fetch_price(symbol):
+    url = "https://api.nobitex.ir/market/stats"
+    try:
+        response = requests.get(url)
+        stats = response.json().get("stats", {})
+        if symbol in stats:
+            return float(stats[symbol]["latest"])
+        else:
+            log(f"Symbol not found: {symbol}")
+            return None
+    except Exception as e:
+        log(f"Error fetching {symbol}: {e}")
+        return None
+
+def analyze_prices():
+    ton_usdt = fetch_price("ton-usdt")
+    ton_irt_direct = fetch_price("ton-rls")
+    usdt_irt = fetch_price("usdt-rls")
+
+    if None in (ton_usdt, ton_irt_direct, usdt_irt):
+        log("Error: one or more prices not available.")
+        return
+
+    ton_irt_indirect = ton_usdt * usdt_irt
+    diff = ton_irt_direct - ton_irt_indirect
+    percent_diff = (diff / ton_irt_direct) * 100
+
+    message = (
+        f"📊 TON/USDT: {ton_usdt}\n"
+        f"💰 TON/IRT (Direct): {ton_irt_direct}\n"
+        f"💱 USDT/IRT: {usdt_irt}\n"
+        f"🔄 TON/IRT (Indirect): {ton_irt_indirect:.2f}\n"
+        f"📉 Difference: {diff:.2f} IRR ({percent_diff:.2f}%)"
+    )
+    log(message)
+
+    # سیگنال‌دهی ساده
+    if percent_diff > 2:
+        send_telegram_message("📈 فرصت فروش TON! قیمت مستقیم بالاست.\n\n" + message)
+    elif percent_diff < -2:
+        send_telegram_message("📉 فرصت خرید TON! قیمت غیرمستقیم ارزونه.\n\n" + message)
+
+    return message
 
 def run_bot():
-    prices = []
-    last_signal = None
-    last_alive = time.time()
-    send_telegram("✅ ربات با موفقیت روی Render اجرا شد و فعال است.")
-
+    count = 0
     while True:
         try:
-            price = fetch_price()
-            prices.append(price)
-            if len(prices) > 20:
-                prices.pop(0)
-            if len(prices) >= 20:
-                ma5 = sum(prices[-5:]) / 5
-                ma20 = sum(prices) / 20
-
-                if ma5 > ma20 and last_signal != "buy":
-                    send_telegram("📈 سیگنال خرید (تقاطع صعودی MA5/MA20)")
-                    last_signal = "buy"
-                elif ma5 < ma20 and last_signal != "sell":
-                    send_telegram("📉 سیگنال فروش (تقاطع نزولی MA5/MA20)")
-                    last_signal = "sell"
-
-            # هر 12 ساعت پیام وضعیت بده
-            if time.time() - last_alive > 43200:
-                send_telegram("🔄 ربات همچنان فعال است و بازار را رصد می‌کند.")
-                last_alive = time.time()
-
+            analyze_prices()
+            count += 1
+            if count >= 72:  # تقریباً هر 12 ساعت (72 بار در فواصل 10 دقیقه‌ای)
+                send_telegram_message("🕒 گزارش ۱۲ ساعته:\n\n" + analyze_prices())
+                count = 0
         except Exception as e:
-            traceback.print_exc()
-            send_telegram(f"❗ خطا: {e}")
-
-        time.sleep(300)  # هر ۵ دقیقه یک بار داده جدید
+            log(f"Unexpected error: {e}")
+        time.sleep(600)  # هر ۱۰ دقیقه
 
 if __name__ == "__main__":
+    send_telegram_message("🚀 ربات TON شروع به کار کرد.")
     run_bot()
