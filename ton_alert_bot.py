@@ -1,85 +1,97 @@
-import requests
-import time
 import os
-from datetime import datetime
+import time
+import requests
+import pandas as pd
+import numpy as np
+import logging
+from ta.trend import EMAIndicator, MACD
+from ta.momentum import RSIIndicator
+from ta.volatility import BollingerBands
+from scipy.signal import argrelextrema
+from telegram import Bot
 from dotenv import load_dotenv
 
-# بارگذاری متغیرهای محیطی از فایل .env
 load_dotenv()
+
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-LOG_FILE = "log.txt"
+bot = Bot(token=TELEGRAM_TOKEN)
 
-def send_telegram_message(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
+# تنظیمات عمومی
+SYMBOL = "TONUSDT"
+INTERVALS = ["15m", "1h", "4h"]  # تایم‌فریم‌های تحلیل
+API_URL = "https://api.binance.com/api/v3/klines"
+
+
+def fetch_ohlcv(symbol: str, interval: str, limit: int = 100):
+    params = {
+        "symbol": symbol.upper(),
+        "interval": interval,
+        "limit": limit
+    }
+    res = requests.get(API_URL, params=params)
+    data = res.json()
+    df = pd.DataFrame(data, columns=[
+        'timestamp', 'open', 'high', 'low', 'close', 'volume',
+        '_', '_', '_', '_', '_'
+    ])
+    df['close'] = pd.to_numeric(df['close'])
+    df['volume'] = pd.to_numeric(df['volume'])
+    return df
+
+
+def analyze(df: pd.DataFrame):
+    signals = []
+
+    # اندیکاتورهای تکنیکال
+    rsi = RSIIndicator(close=df['close']).rsi()
+    ema_fast = EMAIndicator(close=df['close'], window=9).ema_indicator()
+    ema_slow = EMAIndicator(close=df['close'], window=21).ema_indicator()
+    macd = MACD(close=df['close']).macd_diff()
+    bb = BollingerBands(close=df['close'])
+
+    close = df['close']
+    volume = df['volume']
+
+    # قوانین نوسان‌گیری ساده
+    if (
+        rsi.iloc[-1] < 30 and
+        macd.iloc[-1] > 0 and
+        close.iloc[-1] < bb.bollinger_lband().iloc[-1]
+    ):
+        signals.append("🔵 سیگنال خرید کوتاه‌مدت")
+
+    elif (
+        rsi.iloc[-1] > 70 and
+        macd.iloc[-1] < 0 and
+        close.iloc[-1] > bb.bollinger_hband().iloc[-1]
+    ):
+        signals.append("🔴 سیگنال فروش کوتاه‌مدت")
+
+    return signals
+
+
+def run_analysis():
     try:
-        requests.post(url, data=data)
-    except Exception as e:
-        print(f"Error sending message: {e}")
+        all_signals = []
+        for interval in INTERVALS:
+            df = fetch_ohlcv(SYMBOL, interval)
+            signals = analyze(df)
+            if signals:
+                all_signals.extend([f"[{interval}] {s}" for s in signals])
 
-def log(text):
-    with open(LOG_FILE, "a") as f:
-        f.write(f"{datetime.now()} - {text}\n")
-
-def fetch_price(symbol):
-    url = "https://api.nobitex.ir/market/stats"
-    try:
-        response = requests.get(url)
-        stats = response.json().get("stats", {})
-        if symbol in stats:
-            return float(stats[symbol]["latest"])
+        if all_signals:
+            message = f"📊 هشدار تحلیلگر TON/USDT:\n\n" + "\n".join(all_signals)
+            bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
         else:
-            log(f"Symbol not found: {symbol}")
-            return None
+            print("هیچ سیگنالی یافت نشد.")
+
     except Exception as e:
-        log(f"Error fetching {symbol}: {e}")
-        return None
+        logging.exception("خطا در اجرای تحلیل:")
 
-def analyze_prices():
-    ton_usdt = fetch_price("ton-usdt")
-    ton_irt_direct = fetch_price("ton-rls")
-    usdt_irt = fetch_price("usdt-rls")
 
-    if None in (ton_usdt, ton_irt_direct, usdt_irt):
-        log("Error: one or more prices not available.")
-        return
-
-    ton_irt_indirect = ton_usdt * usdt_irt
-    diff = ton_irt_direct - ton_irt_indirect
-    percent_diff = (diff / ton_irt_direct) * 100
-
-    message = (
-        f"📊 TON/USDT: {ton_usdt}\n"
-        f"💰 TON/IRT (Direct): {ton_irt_direct}\n"
-        f"💱 USDT/IRT: {usdt_irt}\n"
-        f"🔄 TON/IRT (Indirect): {ton_irt_indirect:.2f}\n"
-        f"📉 Difference: {diff:.2f} IRR ({percent_diff:.2f}%)"
-    )
-    log(message)
-
-    # سیگنال‌دهی ساده
-    if percent_diff > 2:
-        send_telegram_message("📈 فرصت فروش TON! قیمت مستقیم بالاست.\n\n" + message)
-    elif percent_diff < -2:
-        send_telegram_message("📉 فرصت خرید TON! قیمت غیرمستقیم ارزونه.\n\n" + message)
-
-    return message
-
-def run_bot():
-    count = 0
+if __name__ == '__main__':
     while True:
-        try:
-            analyze_prices()
-            count += 1
-            if count >= 72:  # تقریباً هر 12 ساعت (72 بار در فواصل 10 دقیقه‌ای)
-                send_telegram_message("🕒 گزارش ۱۲ ساعته:\n\n" + analyze_prices())
-                count = 0
-        except Exception as e:
-            log(f"Unexpected error: {e}")
-        time.sleep(600)  # هر ۱۰ دقیقه
-
-if __name__ == "__main__":
-    send_telegram_message("🚀 ربات TON شروع به کار کرد.")
-    run_bot()
+        run_analysis()
+        time.sleep(900)  # تحلیل هر ۱۵ دقیقه
