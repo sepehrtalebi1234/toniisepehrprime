@@ -1,12 +1,12 @@
 services:
   - type: web
-    name: ton-alert-bot
+    name: ton-analyzer
     env: python
     plan: free
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "python ton_alert_bot.py"
+    startCommand: "python main.py"
     envVars:
-      - key: TELEGRAM_BOT_TOKEN
+      - key: BOT_TOKEN
         value: "7298026834:AAEwedBFU0yS5gFTHeAbKaJozb1ZZ_4JVNI"
-      - key: TELEGRAM_CHAT_ID
+      - key: CHAT_ID
         value: "@Zh_zhhch"
